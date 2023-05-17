@@ -23,7 +23,12 @@ DRACUT_DIR = '/dracut'
 
 
 def _get_target_kernel_modules_dir():
-    target_kernel = next(api.consume(InstalledTargetKernelVersion))
+    target_kernel = next(api.consume(InstalledTargetKernelVersion), None)
+    if not target_kernel:
+        raise StopActorExecutionError(
+            'Cannot get version of the installed RHEL-8 kernel',
+            details={'Problem': 'Did not receive a message with installed RHEL-8 kernel version'
+                                ' (InstalledTargetKernelVersion)'})
     return '/usr/lib/modules/' + target_kernel.version
 
 
@@ -218,6 +223,8 @@ def generate_initram_disk(context):
         modules['dracut'].extend(task.include_dracut_modules)
         modules['kernel'].extend(task.include_kernel_modules)
         files.update(task.include_files)
+
+    api.current_logger().debug('Kernel Modules: {}'.format(modules['kernel']))
 
     # TODO(dkubek): Merge into single function
     copy_dracut_modules(context, modules['dracut'])

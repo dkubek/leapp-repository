@@ -67,6 +67,15 @@ build() {
         DRACUT_MODULES_ADD=$(echo "--add $LEAPP_ADD_DRACUT_MODULES" | sed 's/,/ --add /g')
     fi
 
+    KERNEL_MODULES_ADD=""
+    if [[ -n "$LEAPP_ADD_KERNEL_MODULES"]]
+        # depmod -a
+        KERNEL_MODULES_ADD=$(
+            echo "--add--drivers $LEAPP_ADD_KERNEL_MODULES" | 
+            sed 's/,/ --add-drivers /g'
+            )
+    fi
+
     DRACUT_INSTALL="systemd-nspawn"
     if [[ -n "$LEAPP_DRACUT_INSTALL_FILES" ]]; then
         DRACUT_INSTALL="$DRACUT_INSTALL $LEAPP_DRACUT_INSTALL_FILES"
@@ -86,6 +95,7 @@ build() {
         --confdir "$DRACUT_CONF_DIR" \
         --install "$DRACUT_INSTALL" \
         $DRACUT_MODULES_ADD \
+        $KERNEL_MODULES_ADD \
         "$DRACUT_MDADMCONF_ARG" \
         "$DRACUT_LVMCONF_ARG" \
         --no-hostonly \

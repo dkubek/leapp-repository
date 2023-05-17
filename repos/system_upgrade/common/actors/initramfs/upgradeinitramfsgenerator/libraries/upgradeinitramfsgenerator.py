@@ -9,6 +9,7 @@ from leapp.models import RequiredUpgradeInitramPackages  # deprecated
 from leapp.models import UpgradeDracutModule  # deprecated
 from leapp.models import (
     BootContent,
+    InstalledTargetKernelVersion,
     TargetOSInstallationImage,
     TargetUserSpaceInfo,
     TargetUserSpaceUpgradeTasks,
@@ -21,6 +22,11 @@ INITRAM_GEN_SCRIPT_NAME = 'generate-initram.sh'
 DRACUT_DIR = '/dracut'
 
 
+def _get_target_kernel_modules_dir():
+    target_kernel = next(api.consume(InstalledTargetKernelVersion))
+    return '/usr/lib/modules/' + target_kernel.version
+
+
 def _reinstall_leapp_repository_hint():
     """
     Convenience function for creating a detail for StopActorExecutionError with a hint to reinstall the
@@ -31,6 +37,7 @@ def _reinstall_leapp_repository_hint():
     }
 
 
+# TODO(dkubek): Merge copy_dracut_modules and copy_kernel_modules into a single function
 def copy_dracut_modules(context, modules):
     """
     Copy dracut modules into the target userspace.
@@ -61,6 +68,46 @@ def copy_dracut_modules(context, modules):
                 name=module.name, source=module.module_path, target=context.full_path(DRACUT_DIR)), exc_info=True)
             raise StopActorExecutionError(
                 message='Failed to install dracut modules required in the initram. Error: {}'.format(str(e))
+            )
+
+
+def copy_kernel_modules(context, modules):
+    """
+    Copy kernel modules into the target userspace.
+
+    If duplicated requirements to copy a dracut module are detected,
+    log the debug msg and skip any try to copy a dracut module into the
+    target userspace that already exists inside DRACTUR_DIR.
+    """
+
+    kernel_modules_dir = _get_target_kernel_modules_dir()
+    dst_dir = os.path.join(kernel_modules_dir, 'extra', 'leapp')
+    if not os.path.exists(context.full_path(dst_dir)):
+        context.mkdir(dst_dir)
+
+    for module in modules:
+        if not module.module_path:
+            continue
+
+        dst_path = os.path.join(dst_dir, os.path.basename(module.module_path))
+        if os.path.exists(context.full_path(dst_path)):
+            # TODO(dkubek): Should I silently skip or abort?
+            api.current_logger().debug(
+                'The {name} kernel module has been already installed. Skipping.'
+                .format(name=module.name))
+            continue
+
+        copy_fn = context.copytree_to
+        if os.path.isfile(module.module_path):
+            copy_fn = context.copy_to
+
+        try:
+            copy_fn(module.module_path, dst_path)
+        except shutil.Error as e:
+            api.current_logger().error('Failed to copy kernel module "{name}" from "{source}" to "{target}"'.format(
+                name=module.name, source=module.module_path, target=context.full_path(dst_dir)), exc_info=True)
+            raise StopActorExecutionError(
+                message='Failed to install kernel modules required in the initram. Error: {}'.format(str(e))
             )
 
 
@@ -159,24 +206,36 @@ def generate_initram_disk(context):
     env = {}
     if get_target_major_version() == '9':
         env = {'SYSTEMD_SECCOMP': '0'}
+
     # TODO(pstodulk): Add possibility to add particular drivers
     # Issue #645
-    modules = _get_dracut_modules()  # deprecated
+    modules = {
+        'dracut': _get_dracut_modules(),  # deprecated
+        'kernel': [],
+    }
     files = set()
     for task in api.consume(UpgradeInitramfsTasks):
-        modules.extend(task.include_dracut_modules)
+        modules['dracut'].extend(task.include_dracut_modules)
+        modules['kernel'].extend(task.include_kernel_modules)
         files.update(task.include_files)
-    copy_dracut_modules(context, modules)
+
+    # TODO(dkubek): Merge into single function
+    copy_dracut_modules(context, modules['dracut'])
+    copy_kernel_modules(context, modules['kernel'])
+
     # FIXME: issue #376
     context.call([
         '/bin/sh', '-c',
-        'LEAPP_ADD_DRACUT_MODULES="{modules}" LEAPP_KERNEL_ARCH={arch} '
+        'LEAPP_ADD_DRACUT_MODULES="{dracut_modules}" LEAPP_KERNEL_ARCH={arch} '
+        'LEAPP_ADD_KERNEL_MODULES="{kernel_modules}" '
         'LEAPP_DRACUT_INSTALL_FILES="{files}" {cmd}'.format(
-            modules=','.join([mod.name for mod in modules]),
+            dracut_modules=','.join([mod.name for mod in modules['dracut']]),
+            kernel_modules=','.join([mod.name for mod in modules['kernel']]),
             arch=api.current_actor().configuration.architecture,
             files=' '.join(files),
             cmd=os.path.join('/', INITRAM_GEN_SCRIPT_NAME))
     ], env=env)
+
     copy_boot_files(context)
 
 

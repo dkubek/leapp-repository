@@ -127,6 +127,8 @@ class _BreadCrumbs(object):
         return []
 
     def _verify_leapp_pkgs(self):
+        if not os.environ.get('LEAPP_IPU_IN_PROGRESS'):
+            return []
         upg_path = os.environ.get('LEAPP_IPU_IN_PROGRESS').split('to')
         cmd = ['/bin/bash', '-c', 'rpm -V leapp leapp-upgrade-el{}toel{}'.format(upg_path[0], upg_path[1])]
         res = _call(cmd, lambda x, y: None, lambda x, y: None)

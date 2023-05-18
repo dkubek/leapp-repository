@@ -253,6 +253,8 @@ def generate_initram_disk(context):
     copy_dracut_modules(context, modules['dracut'])
     copy_kernel_modules(context, modules['kernel'])
 
+    import pdb; pdb.set_trace()
+
     # FIXME: issue #376
     context.call([
         '/bin/sh', '-c',

@@ -69,7 +69,7 @@ build() {
 
     KERNEL_MODULES_ADD=""
     if [[ -n "$LEAPP_ADD_KERNEL_MODULES" ]]; then
-        # depmod -a
+        depmod "${KERNEL_VERSION}" -a
         KERNEL_MODULES_ADD=$(
             echo "--add-drivers $LEAPP_ADD_KERNEL_MODULES" | 
             sed 's/,/ --add-drivers /g'

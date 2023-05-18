@@ -12,7 +12,8 @@ def _create_kernel_modules():
     if modules_base_path:
         modules_base_path = os.path.abspath(modules_base_path)
         for module in os.listdir(modules_base_path):
-            km = KernelModule(name=module, module_path=os.path.join(modules_base_path, module))
+            module_name = module.replace('.ko.xz', '')
+            km = KernelModule(name=module_name, module_path=os.path.join(modules_base_path, module))
             yield UpgradeInitramfsTasks(include_kernel_modules=[km])
 
 

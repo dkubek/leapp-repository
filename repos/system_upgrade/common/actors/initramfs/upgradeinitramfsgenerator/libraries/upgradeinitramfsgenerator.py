@@ -4,7 +4,7 @@ import shutil
 from leapp.exceptions import StopActorExecutionError
 from leapp.libraries.common import dnfplugin, mounting
 from leapp.libraries.common.config.version import get_target_major_version
-from leapp.libraries.stdlib import api
+from leapp.libraries.stdlib import api, CalledProcessError, run
 from leapp.models import RequiredUpgradeInitramPackages  # deprecated
 from leapp.models import UpgradeDracutModule  # deprecated
 from leapp.models import (
@@ -23,13 +23,27 @@ DRACUT_DIR = '/dracut'
 
 
 def _get_target_kernel_modules_dir():
-    target_kernel = next(api.consume(InstalledTargetKernelVersion), None)
-    if not target_kernel:
+    # TODO(dkubek): This does not work as the message in produces in the Upgrade phase
+    # target_kernel = next(api.consume(InstalledTargetKernelVersion))
+
+    kernel_version = None
+    try :
+        results = run([ 'rpm', '-qa', 'kernel', '--qf', "'%{VERSION}-%{RELEASE}.%{ARCH}\n'", 
+            '|', 'sort', '--version-sort', 
+            '|', 'tail', '--lines=1',
+            ])
+        kernel_version = next(results, None)
+    except CalledProcessError:
         raise StopActorExecutionError(
-            'Cannot get version of the installed RHEL-8 kernel',
-            details={'Problem': 'Did not receive a message with installed RHEL-8 kernel version'
-                                ' (InstalledTargetKernelVersion)'})
-    return '/usr/lib/modules/' + target_kernel.version
+            'Cannot get version of the installed kernel.',
+            details={'Problem': 'Could not query the currently installed kernel through rmp.'})
+
+    if not kernel_version:
+        raise StopActorExecutionError(
+            'Cannot get version of the installed kernel.',
+            details={'Problem': 'A rpm query for the available kernels did not produce any results.'})
+
+    return kernel_version
 
 
 def _reinstall_leapp_repository_hint():

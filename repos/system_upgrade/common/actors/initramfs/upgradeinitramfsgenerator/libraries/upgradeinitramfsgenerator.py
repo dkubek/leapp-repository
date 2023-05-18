@@ -1,5 +1,6 @@
 import os
 import shutil
+from distutils.version import LooseVersion
 
 from leapp.exceptions import StopActorExecutionError
 from leapp.libraries.common import dnfplugin, mounting
@@ -29,7 +30,10 @@ def _get_target_kernel_modules_dir():
     kernel_version = None
     try :
         results = run(['rpm', '-qa', 'kernel'], split=True)
-        kernel_version = next(sorted(results['stdout']), None)
+
+        versions = map(results['stdout'], lambda _: _.replace('kernel-', ''))
+        sorted_versions = sorted(versions, key=LooseVersion, reverse=True)
+        kernel_version = next(iter(sorted_versions), None)
     except CalledProcessError:
         raise StopActorExecutionError(
             'Cannot get version of the installed kernel.',
@@ -39,6 +43,11 @@ def _get_target_kernel_modules_dir():
         raise StopActorExecutionError(
             'Cannot get version of the installed kernel.',
             details={'Problem': 'A rpm query for the available kernels did not produce any results.'})
+
+
+    api.current_logger().debug(
+        'Detected highest kernel version is {kernel_version}.'
+        .format(kernel_version=kernel_version))
 
     return kernel_version
 

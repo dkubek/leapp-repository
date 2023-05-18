@@ -28,11 +28,8 @@ def _get_target_kernel_modules_dir():
 
     kernel_version = None
     try :
-        results = run([ 'rpm', '-qa', 'kernel',
-            '|', 'sort', '--version-sort', 
-            '|', 'tail', '--lines=1',
-            ])
-        kernel_version = next(results['stdout'], None)
+        results = run(['rpm', '-qa', 'kernel'], split=True)
+        kernel_version = next(sorted(results['stdout']), None)
     except CalledProcessError:
         raise StopActorExecutionError(
             'Cannot get version of the installed kernel.',

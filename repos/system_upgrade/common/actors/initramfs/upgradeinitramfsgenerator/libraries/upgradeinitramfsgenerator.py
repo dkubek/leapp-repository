@@ -23,15 +23,18 @@ INITRAM_GEN_SCRIPT_NAME = 'generate-initram.sh'
 DRACUT_DIR = '/dracut'
 
 
-def _get_target_kernel_modules_dir():
+def _get_target_kernel_modules_dir(context):
     # TODO(dkubek): This does not work as the message in produces in the Upgrade phase
     # target_kernel = next(api.consume(InstalledTargetKernelVersion))
 
     kernel_version = None
     try :
-        results = run(['rpm', '-qa', 'kernel'], split=True)
+        results = context.call(['rpm', '-qa', 'kernel'], split=True)
 
-        versions = map(results['stdout'], lambda _: _.replace('kernel-', ''))
+        versions = map(lambda _: _.replace('kernel-', ''), results['stdout'])
+        api.current_logger().debug(
+            'Versions detected {versions}.'
+            .format(versions=versions))
         sorted_versions = sorted(versions, key=LooseVersion, reverse=True)
         kernel_version = next(iter(sorted_versions), None)
     except CalledProcessError:
@@ -105,10 +108,10 @@ def copy_kernel_modules(context, modules):
     target userspace that already exists inside DRACTUR_DIR.
     """
 
-    kernel_modules_dir = _get_target_kernel_modules_dir()
+    kernel_modules_dir = _get_target_kernel_modules_dir(context)
     dst_dir = os.path.join(kernel_modules_dir, 'extra', 'leapp')
     if not os.path.exists(context.full_path(dst_dir)):
-        context.mkdir(dst_dir)
+        os.makedirs(context.full_path(dst_dir))
 
     for module in modules:
         if not module.module_path:
@@ -116,7 +119,6 @@ def copy_kernel_modules(context, modules):
 
         dst_path = os.path.join(dst_dir, os.path.basename(module.module_path))
         if os.path.exists(context.full_path(dst_path)):
-            # TODO(dkubek): Should I silently skip or abort?
             api.current_logger().debug(
                 'The {name} kernel module has been already installed. Skipping.'
                 .format(name=module.name))
@@ -245,6 +247,7 @@ def generate_initram_disk(context):
         files.update(task.include_files)
 
     api.current_logger().debug('Kernel Modules: {}'.format(modules['kernel']))
+
 
     # TODO(dkubek): Merge into single function
     copy_dracut_modules(context, modules['dracut'])

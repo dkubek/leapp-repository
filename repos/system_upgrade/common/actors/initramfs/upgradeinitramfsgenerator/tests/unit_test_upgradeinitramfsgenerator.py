@@ -10,7 +10,6 @@ from leapp.libraries.common.testutils import CurrentActorMocked, logger_mocked, 
 from leapp.utils.deprecation import suppress_deprecation
 
 from leapp.models import (  # isort:skip
-    FIPSInfo,
     RequiredUpgradeInitramPackages,  # deprecated
     UpgradeDracutModule,  # deprecated
     BootContent,
@@ -65,7 +64,7 @@ def gen_UIT(dracut_modules, kernel_modules, files):
         dracut_modules = [dracut_modules]
 
     if not isinstance(kernel_modules, list):
-        kernel_modules = [ kernel_modules ]
+        kernel_modules = [kernel_modules]
 
     if not isinstance(files, list):
         files = [files]
@@ -267,7 +266,7 @@ def test_prepare_userspace_for_initram(monkeypatch, adjust_cwd, input_msgs, pkgs
     # test dracut modules with old and new models
     (gen_UDM_list(MODULES[1]) + [gen_UIT(MODULES[2], [], [])], MODULES[1:3], []),
     (gen_UDM_list(MODULES[2:]) + [gen_UIT(MODULES[0:2], [], [])], MODULES, []),
-    (gen_UDM_list(MODULES[1]) + [gen_UIT([], MODULES[2] , [])], MODULES[1], MODULES[2]),
+    (gen_UDM_list(MODULES[1]) + [gen_UIT([], MODULES[2], [])], MODULES[1], MODULES[2]),
     (gen_UDM_list(MODULES[2:]) + [gen_UIT([], MODULES[0:2], [])], MODULES[2:], MODULES[0:2]),
 
     # TODO(pstodulk): test include files missing (relates #376)
@@ -326,6 +325,7 @@ def test_copy_dracut_modules_rmtree_ignore(monkeypatch):
     upgradeinitramfsgenerator.copy_dracut_modules(context, dmodules)
     assert context.content
 
+
 @pytest.mark.parametrize('kind', ['dracut', 'kernel'])
 def test_copy_modules_fail(monkeypatch, kind):
     context = MockedContext()
@@ -357,8 +357,10 @@ def test_copy_modules_fail(monkeypatch, kind):
     with pytest.raises(StopActorExecutionError) as err:
         copy_fn(context, modules)
     assert err.value.message.startswith('Failed to install {kind} modules'.format(kind=kind))
-    expected_err_log = 'Failed to copy {kind} module "foo" from "/path/foo" to "/base/dir/{dst_path}"'.format(kind=kind, dst_path=dst_path)
+    expected_err_log = 'Failed to copy {kind} module "foo" from "/path/foo" to "/base/dir/{dst_path}"'.format(
+            kind=kind, dst_path=dst_path)
     assert expected_err_log in upgradeinitramfsgenerator.api.current_logger.errmsg
+
 
 @pytest.mark.parametrize('kind', ['dracut', 'kernel'])
 def test_copy_modules_duplicate_skip(monkeypatch, kind):

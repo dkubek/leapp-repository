@@ -16,6 +16,7 @@ from leapp.models import (  # isort:skip
     BootContent,
     CopyFile,
     DracutModule,
+    KernelModule,
     TargetUserSpaceUpgradeTasks,
     UpgradeInitramfsTasks,
 )
@@ -59,13 +60,23 @@ def gen_RUIP(packages):
     return RequiredUpgradeInitramPackages(packages=packages)
 
 
-def gen_UIT(modules, files):
-    if not isinstance(modules, list):
-        modules = [modules]
+def gen_UIT(dracut_modules, kernel_modules, files):
+    if not isinstance(dracut_modules, list):
+        dracut_modules = [dracut_modules]
+
+    if not isinstance(kernel_modules, list):
+        kernel_modules = [ kernel_modules ]
+
     if not isinstance(files, list):
         files = [files]
-    dracut_modules = [DracutModule(name=i[0], module_path=i[1]) for i in modules]
-    return UpgradeInitramfsTasks(include_files=files, include_dracut_modules=dracut_modules)
+
+    dracut_modules = [DracutModule(name=i[0], module_path=i[1]) for i in dracut_modules]
+    kernel_modules = [KernelModule(name=i[0], module_path=i[1]) for i in kernel_modules]
+
+    return UpgradeInitramfsTasks(include_files=files,
+                                 include_dracut_modules=dracut_modules,
+                                 include_kernel_modules=kernel_modules,
+                                 )
 
 
 @suppress_deprecation(UpgradeDracutModule)
@@ -81,6 +92,7 @@ class MockedContext(object):
         self.called_copytree_from = []
         self.called_copy_to = []
         self.called_call = []
+        self.called_makedirs = []
         self.content = set()
         self.base_dir = "/base/dir"
         """
@@ -107,6 +119,9 @@ class MockedContext(object):
     def copytree_to(self, src, dst):
         self.called_copy_to.append((src, dst))
         self.content.add(dst)
+
+    def makedirs(self, path):
+        self.called_makedirs.append(path)
 
     def remove_tree(self, path):
         # make list for iteration as change of the set is expected during the
@@ -240,38 +255,50 @@ def test_prepare_userspace_for_initram(monkeypatch, adjust_cwd, input_msgs, pkgs
     assert _sort_files(upgradeinitramfsgenerator._copy_files.args[1]) == _files
 
 
-@pytest.mark.parametrize('input_msgs,modules', [
+@pytest.mark.parametrize('input_msgs,dracut_modules,kernel_modules', [
     # test dracut modules with UpgradeDracutModule(s) - orig functionality
-    (gen_UDM_list(MODULES[0]), MODULES[0]),
-    (gen_UDM_list(MODULES), MODULES),
+    (gen_UDM_list(MODULES[0]), MODULES[0], []),
+    (gen_UDM_list(MODULES), MODULES, []),
 
     # test dracut modules with UpgradeInitramfsTasks - new functionality
-    ([gen_UIT(MODULES[0], [])], MODULES[0]),
-    ([gen_UIT(MODULES, [])], MODULES),
+    ([gen_UIT(MODULES[0], MODULES[0], [])], MODULES[0], MODULES[0]),
+    ([gen_UIT(MODULES, MODULES, [])], MODULES, MODULES),
 
     # test dracut modules with old and new models
-    (gen_UDM_list(MODULES[1]) + [gen_UIT(MODULES[2], [])], MODULES[1:3]),
-    (gen_UDM_list(MODULES[2:]) + [gen_UIT(MODULES[0:2], [])], MODULES),
+    (gen_UDM_list(MODULES[1]) + [gen_UIT(MODULES[2], [], [])], MODULES[1:3], []),
+    (gen_UDM_list(MODULES[2:]) + [gen_UIT(MODULES[0:2], [], [])], MODULES, []),
+    (gen_UDM_list(MODULES[1]) + [gen_UIT([], MODULES[2] , [])], MODULES[1], MODULES[2]),
+    (gen_UDM_list(MODULES[2:]) + [gen_UIT([], MODULES[0:2], [])], MODULES[2:], MODULES[0:2]),
 
     # TODO(pstodulk): test include files missing (relates #376)
 ])
-def test_generate_initram_disk(monkeypatch, input_msgs, modules):
+def test_generate_initram_disk(monkeypatch, input_msgs, dracut_modules, kernel_modules):
     context = MockedContext()
     curr_actor = CurrentActorMocked(msgs=input_msgs, arch=architecture.ARCH_X86_64)
     monkeypatch.setattr(upgradeinitramfsgenerator.api, 'current_actor', curr_actor)
     monkeypatch.setattr(upgradeinitramfsgenerator, 'copy_dracut_modules', MockedCopyArgs())
+    monkeypatch.setattr(upgradeinitramfsgenerator, '_get_target_kernel_version', lambda _: '')
+    monkeypatch.setattr(upgradeinitramfsgenerator, 'copy_kernel_modules', MockedCopyArgs())
     monkeypatch.setattr(upgradeinitramfsgenerator, 'copy_boot_files', lambda dummy: None)
     upgradeinitramfsgenerator.generate_initram_disk(context)
 
     # test now just that all modules have been passed for copying - so we know
     # all modules have been consumed
-    detected_modules = set()
-    _modules = set(modules) if isinstance(modules, list) else set([modules])
+    detected_dracut_modules = set()
+    _dracut_modules = set(dracut_modules) if isinstance(dracut_modules, list) else set([dracut_modules])
     for dracut_module in upgradeinitramfsgenerator.copy_dracut_modules.args[1]:
         module = (dracut_module.name, dracut_module.module_path)
-        assert module in _modules
-        detected_modules.add(module)
-    assert detected_modules == _modules
+        assert module in _dracut_modules
+        detected_dracut_modules.add(module)
+    assert detected_dracut_modules == _dracut_modules
+
+    detected_kernel_modules = set()
+    _kernel_modules = set(kernel_modules) if isinstance(kernel_modules, list) else set([kernel_modules])
+    for kernel_module in upgradeinitramfsgenerator.copy_kernel_modules.args[1]:
+        module = (kernel_module.name, kernel_module.module_path)
+        assert module in _kernel_modules
+        detected_kernel_modules.add(module)
+    assert detected_kernel_modules == _kernel_modules
 
     # TODO(pstodulk): this test is not created properly, as context.call check
     # is skipped completely. Testing will more convenient with fixed #376
@@ -299,8 +326,8 @@ def test_copy_dracut_modules_rmtree_ignore(monkeypatch):
     upgradeinitramfsgenerator.copy_dracut_modules(context, dmodules)
     assert context.content
 
-
-def test_copy_dracut_modules_fail(monkeypatch):
+@pytest.mark.parametrize('kind', ['dracut', 'kernel'])
+def test_copy_modules_fail(monkeypatch, kind):
     context = MockedContext()
 
     def copytree_to_error(src, dst):
@@ -313,15 +340,28 @@ def test_copy_dracut_modules_fail(monkeypatch):
     context.copytree_to = copytree_to_error
     monkeypatch.setattr(os.path, 'exists', mock_context_path_exists)
     monkeypatch.setattr(upgradeinitramfsgenerator.api, 'current_logger', MockedLogger())
-    dmodules = [DracutModule(name='foo', module_path='/path/foo')]
+    monkeypatch.setattr(upgradeinitramfsgenerator, '_get_target_kernel_modules_dir', lambda _: '/kernel_modules')
+
+    module_class = None
+    copy_fn = None
+    if kind == 'dracut':
+        module_class = DracutModule
+        copy_fn = upgradeinitramfsgenerator.copy_dracut_modules
+        dst_path = 'dracut'
+    elif kind == 'kernel':
+        module_class = KernelModule
+        copy_fn = upgradeinitramfsgenerator.copy_kernel_modules
+        dst_path = 'kernel_modules'
+
+    modules = [module_class(name='foo', module_path='/path/foo')]
     with pytest.raises(StopActorExecutionError) as err:
-        upgradeinitramfsgenerator.copy_dracut_modules(context, dmodules)
-    assert err.value.message.startswith('Failed to install dracut modules')
-    expected_err_log = 'Failed to copy dracut module "foo" from "/path/foo" to "/base/dir/dracut"'
+        copy_fn(context, modules)
+    assert err.value.message.startswith('Failed to install {kind} modules'.format(kind=kind))
+    expected_err_log = 'Failed to copy {kind} module "foo" from "/path/foo" to "/base/dir/{dst_path}"'.format(kind=kind, dst_path=dst_path)
     assert expected_err_log in upgradeinitramfsgenerator.api.current_logger.errmsg
 
-
-def test_copy_dracut_modules_duplicate_skip(monkeypatch):
+@pytest.mark.parametrize('kind', ['dracut', 'kernel'])
+def test_copy_modules_duplicate_skip(monkeypatch, kind):
     context = MockedContext()
 
     def mock_context_path_exists(path):
@@ -330,10 +370,23 @@ def test_copy_dracut_modules_duplicate_skip(monkeypatch):
 
     monkeypatch.setattr(os.path, 'exists', mock_context_path_exists)
     monkeypatch.setattr(upgradeinitramfsgenerator.api, 'current_logger', MockedLogger())
-    dm = DracutModule(name='foo', module_path='/path/foo')
-    dmodules = [dm, dm]
-    debugmsg = 'The foo dracut module has been already installed. Skipping.'
-    upgradeinitramfsgenerator.copy_dracut_modules(context, dmodules)
+    monkeypatch.setattr(upgradeinitramfsgenerator, '_get_target_kernel_modules_dir', lambda _: '/kernel_modules')
+
+    module_class = None
+    copy_fn = None
+    if kind == 'dracut':
+        module_class = DracutModule
+        copy_fn = upgradeinitramfsgenerator.copy_dracut_modules
+    elif kind == 'kernel':
+        module_class = KernelModule
+        copy_fn = upgradeinitramfsgenerator.copy_kernel_modules
+
+    module = module_class(name='foo', module_path='/path/foo')
+    modules = [module, module]
+
+    copy_fn(context, modules)
+
+    debugmsg = 'The foo {kind} module has been already installed. Skipping.'.format(kind=kind)
     assert context.content
     assert len(context.called_copy_to) == 1
     assert debugmsg in upgradeinitramfsgenerator.api.current_logger.dbgmsg

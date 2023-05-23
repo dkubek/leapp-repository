@@ -5,12 +5,11 @@ from distutils.version import LooseVersion
 from leapp.exceptions import StopActorExecutionError
 from leapp.libraries.common import dnfplugin, mounting
 from leapp.libraries.common.config.version import get_target_major_version
-from leapp.libraries.stdlib import api, CalledProcessError, run
+from leapp.libraries.stdlib import api, CalledProcessError
 from leapp.models import RequiredUpgradeInitramPackages  # deprecated
 from leapp.models import UpgradeDracutModule  # deprecated
 from leapp.models import (
     BootContent,
-    InstalledTargetKernelVersion,
     TargetOSInstallationImage,
     TargetUserSpaceInfo,
     TargetUserSpaceUpgradeTasks,
@@ -23,12 +22,13 @@ INITRAM_GEN_SCRIPT_NAME = 'generate-initram.sh'
 DRACUT_DIR = '/dracut'
 
 
-def _get_target_kernel_modules_dir(context):
-    # TODO(dkubek): This does not work as the message in produces in the Upgrade phase
-    # target_kernel = next(api.consume(InstalledTargetKernelVersion))
+def _get_target_kernel_version(context):
+    """
+    Get the version of the most recent kernel version within the container.
+    """
 
     kernel_version = None
-    try :
+    try:
         results = context.call(['rpm', '-qa', 'kernel'], split=True)
 
         versions = map(lambda _: _.replace('kernel-', ''), results['stdout'])
@@ -47,7 +47,16 @@ def _get_target_kernel_modules_dir(context):
             'Cannot get version of the installed kernel.',
             details={'Problem': 'A rpm query for the available kernels did not produce any results.'})
 
-    modules_dir = os.path.join('/', 'lib', 'modules', kernel_version)
+    return kernel_version
+
+
+def _get_target_kernel_modules_dir(context):
+    """
+    Return the path where the custom kernel modules should be copied.
+    """
+
+    kernel_version = _get_target_kernel_version(context)
+    modules_dir = os.path.join('/', 'lib', 'modules', kernel_version, 'extra', 'leapp')
 
     return modules_dir
 
@@ -62,92 +71,16 @@ def _reinstall_leapp_repository_hint():
     }
 
 
-# TODO(dkubek): Merge copy_dracut_modules and copy_kernel_modules into a single function
-def copy_dracut_modules(context, modules):
-    """
-    Copy dracut modules into the target userspace.
-
-    If duplicated requirements to copy a dracut module are detected,
-    log the debug msg and skip any try to copy a dracut module into the
-    target userspace that already exists inside DRACTUR_DIR.
-    """
-    try:
-        context.remove_tree(DRACUT_DIR)
-    except EnvironmentError:
-        pass
-    for module in modules:
-        if not module.module_path:
-            continue
-        dst_path = os.path.join(DRACUT_DIR, os.path.basename(module.module_path))
-        if os.path.exists(context.full_path(dst_path)):
-            # we are safe to skip it as we now the module is from the same path
-            # regarding the actor checking all initramfs tasks
-            api.current_logger().debug(
-                'The {name} dracut module has been already installed. Skipping.'
-                .format(name=module.name))
-            continue
-        try:
-            context.copytree_to(module.module_path, dst_path)
-        except shutil.Error as e:
-            api.current_logger().error('Failed to copy dracut module "{name}" from "{source}" to "{target}"'.format(
-                name=module.name, source=module.module_path, target=context.full_path(DRACUT_DIR)), exc_info=True)
-            raise StopActorExecutionError(
-                message='Failed to install dracut modules required in the initram. Error: {}'.format(str(e))
-            )
-
-
-def copy_kernel_modules(context, modules):
-    """
-    Copy kernel modules into the target userspace.
-
-    If duplicated requirements to copy a dracut module are detected,
-    log the debug msg and skip. Try to copy  module into the
-    target userspace that already exists inside DRACTUR_DIR.
-    """
-
-    kernel_modules_dir = _get_target_kernel_modules_dir(context)
-    dst_dir = os.path.join(kernel_modules_dir, 'extra', 'leapp')
-    if not os.path.exists(context.full_path(dst_dir)):
-        os.makedirs(context.full_path(dst_dir))
-
-    for module in modules:
-        if not module.module_path:
-            continue
-
-        dst_path = os.path.join(dst_dir, os.path.basename(module.module_path))
-        if os.path.exists(context.full_path(dst_path)):
-            api.current_logger().debug(
-                'The {name} kernel module has been already installed. Skipping.'
-                .format(name=module.name))
-            continue
-
-        copy_fn = context.copytree_to
-        if os.path.isfile(module.module_path):
-            copy_fn = context.copy_to
-
-        try:
-            api.current_logger().debug(
-                'Copying module {name} to {path}.'
-                .format(name=module.name, path=dst_path))
-
-            copy_fn(module.module_path, dst_path)
-        except shutil.Error as e:
-            api.current_logger().error('Failed to copy kernel module "{name}" from "{source}" to "{target}"'.format(
-                name=module.name, source=module.module_path, target=context.full_path(dst_dir)), exc_info=True)
-            raise StopActorExecutionError(
-                message='Failed to install kernel modules required in the initram. Error: {}'.format(str(e))
-            )
-
-def _copy_modules_hlp(context, modules, dst_dir, kind):
+def _copy_modules(context, modules, dst_dir, kind):
     """
     Copy modules of given kind to the specified destination directory.
 
-    This helper function attempts to remove an existing destination directory.
-    If the directory does not exist, it is created anew. Then, for each module
-    message, it checks if the module has a module path specified. If the module
-    already exists in the destination directory, a debug message is logged, and
-    the operation is skipped. Otherwise, the module is copied to the destination
-    directory.
+    Attempts to remove an cleanup by removing the existing destination
+    directory. If the directory does not exist, it is created anew. Then, for
+    each module message, it checks if the module has a module path specified. If
+    the module already exists in the destination directory, a debug message is
+    logged, and the operation is skipped. Otherwise, the module is copied to the
+    destination directory.
 
     """
 
@@ -180,45 +113,37 @@ def _copy_modules_hlp(context, modules, dst_dir, kind):
 
             copy_fn(module.module_path, dst_path)
         except shutil.Error as e:
-            api.current_logger().error('Failed to copy {kind} module "{name}" from "{source}" to "{target}"'.format(
-                kind=kind, name=module.name, source=module.module_path, target=context.full_path(dst_dir)), exc_info=True)
+            api.current_logger().error(
+                    'Failed to copy {kind} module "{name}" from "{source}" to "{target}"'.format(
+                        kind=kind, name=module.name, source=module.module_path, target=context.full_path(dst_dir)),
+                    exc_info=True)
             raise StopActorExecutionError(
-                message='Failed to install {kind} modules required in the initram. Error: {error}'.format(kind=kind, error=str(e))
+                message='Failed to install {kind} modules required in the initram. Error: {error}'.format(
+                    kind=kind, error=str(e))
             )
 
 
-def copy_modules(context, modules):
+def copy_dracut_modules(context, modules):
     """
-    Copy dracut and kernel modules into their respective directories in the
-    target userspace.
-
-    The function organizes the copying process for two types of modules: dracut
-    and kernel. 
+    Copy dracut modules into the target userspace.
 
     If a module cannot be copied, an error message is logged, and a
     StopActorExecutionError exception is raised.
-
-    :param context: The context object containing the runtime environment
-                    details. 
-    :type context: NSpawnActions
-
-    :param modules: A dictionary containing two keys: 'dracut' and 'kernel'. The
-                    values associated with these keys are lists of the
-                    corresponding modules to be copied. 
-    :type modules: dict
-
-    :raises StopActorExecutionError: If any module copy operation fails.
     """
 
-    # Copy dracut modules
-    dst_dir = DRACUT_DIR
-    _copy_modules_hlp(context, modules['dracut'], dst_dir, kind='dracut')
+    _copy_modules(context, modules, DRACUT_DIR, 'dracut')
 
-    # Copy kernel modules
-    kernel_modules_dir = _get_target_kernel_modules_dir(context)
-    dst_dir = os.path.join(kernel_modules_dir, 'extra', 'leapp')
-    _copy_modules_hlp(context, modules['kernel'], dst_dir, kind='kernel')
 
+def copy_kernel_modules(context, modules):
+    """
+    Copy kernel modules into the target userspace.
+
+    If a module cannot be copied, an error message is logged, and a
+    StopActorExecutionError exception is raised.
+    """
+
+    dst_dir = _get_target_kernel_modules_dir(context)
+    _copy_modules(context, modules, dst_dir, 'kernel')
 
 
 @suppress_deprecation(UpgradeDracutModule)
@@ -310,8 +235,8 @@ def generate_initram_disk(context):
     """
     Function to actually execute the init ramdisk creation.
 
-    Includes handling of specified dracut modules from the host when needed.
-    The check for the 'conflicting' dracut modules is in a separate actor.
+    Includes handling of specified dracut and kernel modules from the host when
+    needed. The check for the 'conflicting' modules is in a separate actor.
     """
     env = {}
     if get_target_major_version() == '9':
@@ -329,16 +254,17 @@ def generate_initram_disk(context):
         modules['kernel'].extend(task.include_kernel_modules)
         files.update(task.include_files)
 
-    copy_modules(context, modules)
-
-    #import pdb; pdb.set_trace()
+    copy_dracut_modules(context, modules['dracut'])
+    copy_kernel_modules(context, modules['kernel'])
 
     # FIXME: issue #376
     context.call([
         '/bin/sh', '-c',
+        'LEAPP_KERNEL_VERSION={kernel_version} '
         'LEAPP_ADD_DRACUT_MODULES="{dracut_modules}" LEAPP_KERNEL_ARCH={arch} '
         'LEAPP_ADD_KERNEL_MODULES="{kernel_modules}" '
         'LEAPP_DRACUT_INSTALL_FILES="{files}" {cmd}'.format(
+            kernel_version=_get_target_kernel_version(context),
             dracut_modules=','.join([mod.name for mod in modules['dracut']]),
             kernel_modules=','.join([mod.name for mod in modules['kernel']]),
             arch=api.current_actor().configuration.architecture,

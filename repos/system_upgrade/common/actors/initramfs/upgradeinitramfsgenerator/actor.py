@@ -4,7 +4,6 @@ from leapp.models import RequiredUpgradeInitramPackages  # deprecated
 from leapp.models import UpgradeDracutModule  # deprecated
 from leapp.models import (
     BootContent,
-    InstalledTargetKernelVersion,
     FIPSInfo,
     TargetOSInstallationImage,
     TargetUserSpaceInfo,
@@ -29,7 +28,6 @@ class UpgradeInitramfsGenerator(Actor):
 
     name = 'upgrade_initramfs_generator'
     consumes = (
-        InstalledTargetKernelVersion,
         FIPSInfo,
         RequiredUpgradeInitramPackages,  # deprecated
         TargetOSInstallationImage,

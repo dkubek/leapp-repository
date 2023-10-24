@@ -345,7 +345,54 @@ def _get_files_owned_by_rpms(context, dirpath, pkgs=None, recursive=False):
     return files_owned_by_rpms
 
 
-def _copy_certificates(context, target_userspace):
+def _copy_decouple(srcdir, dstdir, skip_broken_symlinks=True):
+    for root, _, files in os.walk(srcdir):
+        for filename in files:
+            relpath = os.path.relpath(root, srcdir)
+            source_filepath = os.path.join(root, filename)
+            target_filepath = os.path.join(dstdir, relpath, filename)
+
+            # Skip broken and report broken symlinks (this follows any possible
+            #                                         chain of symlinks)
+            if skip_broken_symlinks and not os.path.exists(source_filepath):
+                api.current_logger().warning('File {} is a broken symlink!'.format(source_filepath))
+                continue
+
+            # Copy symlinks to the target userspace
+            pointee = None
+            if os.path.islink(source_filepath):
+                pointee = os.readlink(source_filepath)
+
+            # If source file is a symlink within `src` then preserve it,
+            # otherwise resolve and copy it as a file it points to
+            if pointee is not None and not pointee.startswith(srcdir):
+                # Follow the path until we hit a file or get back to /etc/pki
+                while not pointee.startswith(srcdir) and os.path.islink(pointee):
+                    pointee = os.readlink(pointee)
+
+                # Pointee points to a file outside /etc/pki so we copy it instead
+                if not pointee.startswith(srcdir) and not os.path.islink(pointee):
+                    source_filepath = pointee
+                else:
+                    # pointee points back to /etc/pki
+                    pass
+
+            # Ensure parent directory exists
+            parent_dir = os.path.dirname(target_filepath)
+            if not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
+
+            if os.path.islink(source_filepath):
+                # Translate pointee to target /etc/pki
+                target_pointee = os.path.join(dstdir, os.path.relpath(pointee, root))
+                # TODO(dkubek): Preserve the owner and permissions of the original symlink
+                run(['ln', '-s', target_pointee, target_filepath])
+                continue
+
+            run(['cp', '-a', source_filepath, target_filepath])
+
+
+def _copy_certificates(context, target_userspace, skip_broken_symlinks=True):
     """
     Copy the needed cetificates into the container, but preserve original ones
 
@@ -360,36 +407,52 @@ def _copy_certificates(context, target_userspace):
         files_owned_by_rpms = _get_files_owned_by_rpms(target_context, '/etc/pki', recursive=True)
         api.current_logger().debug('Files owned by rpms: {}'.format(' '.join(files_owned_by_rpms)))
 
+    # Backup container /etc/pki
     run(['mv', target_pki, backup_pki])
-    context.copytree_from('/etc/pki', target_pki)
 
+    # Copy source /etc/pki to the container
+    _copy_decouple('/etc/pki', target_pki, skip_broken_symlinks=skip_broken_symlinks)
+
+    # Assertion: If skip_broken_symlinks is True
+    #   => no broken symlinks exist in /etc/pki
+    # So any new broken symlinks created will be by the installed packages.
+
+    # Recover installed packages as they always get precedence
     for filepath in files_owned_by_rpms:
         src_path = os.path.join(backup_pki, filepath)
         dst_path = os.path.join(target_pki, filepath)
 
         # Resolve and skip any broken symlinks
+        # TODO(dkubek): Skip broken symlinks optionally
         is_broken_symlink = False
-        while os.path.islink(src_path):
-            # The symlink points to a path relative to the target userspace so
-            # we need to readjust it
-            next_path = os.path.join(target_userspace, os.readlink(src_path)[1:])
-            if not os.path.exists(next_path):
-                is_broken_symlink = True
+        pointee = None
+        if os.path.islink(src_path):
+            pointee = os.path.join(target_userspace, os.readlink(src_path)[1:])
 
-                # The path original path of the broken symlink in the container
-                report_path = os.path.join(target_pki, os.path.relpath(src_path, backup_pki))
-                api.current_logger().warn('File {} is a broken symlink!'.format(report_path))
-                break
+            while os.path.islink(pointee):
+                # The symlink points to a path relative to the target userspace so
+                # we need to readjust it
+                pointee = os.path.join(target_userspace, os.readlink(src_path)[1:])
+                if not os.path.exists(pointee):
+                    is_broken_symlink = True
 
-            src_path = next_path
+                    # The path original path of the broken symlink in the container
+                    report_path = os.path.join(target_pki, os.path.relpath(src_path, backup_pki))
+                    api.current_logger().warning('File {} is a broken symlink!'.format(report_path))
+                    break
 
-        if is_broken_symlink:
+        if is_broken_symlink and skip_broken_symlinks:
             continue
 
+        # Cleanup conflicting files
         run(['rm', '-rf', dst_path])
+
+        # Ensure destination exists
         parent_dir = os.path.dirname(dst_path)
         run(['mkdir', '-p', parent_dir])
-        run(['cp', '-a', src_path, dst_path])
+
+        # Copy the new file
+        run(['cp', '-R', '--preserve=all', src_path, dst_path])
 
 
 def _prep_repository_access(context, target_userspace):
@@ -401,6 +464,7 @@ def _prep_repository_access(context, target_userspace):
     backup_yum_repos_d = os.path.join(target_etc, 'yum.repos.d.backup')
 
     _copy_certificates(context, target_userspace)
+    context.call(['update-ca-trust', 'extract'])
 
     if not rhsm.skip_rhsm():
         run(['rm', '-rf', os.path.join(target_etc, 'rhsm')])

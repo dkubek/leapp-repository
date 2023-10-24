@@ -2,6 +2,8 @@ import os
 from collections import namedtuple
 
 import pytest
+from pathlib import Path
+import subprocess
 
 from leapp import models, reporting
 from leapp.exceptions import StopActorExecution, StopActorExecutionError
@@ -46,6 +48,82 @@ class MockedMountingBase(object):
 
     def __exit__(self, exception_type, exception_value, traceback):
         pass
+
+
+def traverse_structure(structure, root=Path('/')):
+    for filename, links_to in structure.items():
+        filepath = root / filename
+
+        if isinstance(links_to, dict):
+            yield from traverse_structure(links_to, filepath)
+        else:
+            yield (filepath, links_to)
+
+
+def assert_directory_structure_matches(root, initial, expected):
+    for filepath, links_to in traverse_structure(expected, root=root / 'expected'):
+        assert filepath.exists()
+
+        if links_to is None:
+            assert filepath.is_file()
+            continue
+
+        assert filepath.is_symlink()
+        assert os.readlink(filepath) == str(root / 'expected' / links_to.lstrip('/'))
+
+
+@pytest.fixture
+def temp_directory_layout(tmp_path, initial_structure):
+    for filepath, links_to in traverse_structure(initial_structure, root=tmp_path / 'initial'):
+        file_path = tmp_path / filepath
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if links_to is None:
+            file_path.touch()
+            continue
+
+        file_path.symlink_to(tmp_path / 'initial' / links_to.lstrip('/'))
+
+    (tmp_path / 'expected').mkdir()
+    assert (tmp_path / 'expected').exists()
+
+    return tmp_path
+
+
+# The semantics of initial_structure and expected_structure are as follows:
+#
+# 1. The outermost dictionary encodes the root of a directory structure
+#
+# 2. Depending on the value for a key in a dict, each key in the dictionary
+#    denotes the name of either a:
+#        a) directory -- if value is dict
+#        b) regular file -- if value is None
+#        c) symlink -- if a value is str
+#
+# 3. The value of a symlink entry is a absolut path to a file in the context of
+#    the structure.
+#
+@pytest.mark.parametrize('initial_structure,expected_structure', [
+    ({'dir': {'fileA': None}}, {'dir': {'fileA': None}}),
+    ({'dir': {'fileA': 'nonexistent'}}, {'dir': {}}),
+    ({'dir': {'fileA': '/dir/fileB', 'fileB': None}}, {'dir': {'fileA': '/dir/fileB', 'fileB': None}}),
+    ({'dir': {'fileA': '/dir/fileB', 'fileB': 'nonexistent'}},
+     {'dir': {}}),
+    ({'dir': {'fileA': '/dir/fileB', 'fileB': '/dir/fileC', 'fileC': None}},
+     {'dir': {'fileA': '/dir/fileB', 'fileB': '/dir/fileC', 'fileC': None}}),
+    ({'dir': {'fileA': '/dir/fileB', 'fileB': '/dir/fileC', 'fileC': '/outside/fileOut', 'fileE': None},
+      'outside': {'fileOut': '/outside/fileD', 'fileD': '/dir/fileE'}},
+     {'dir': {'fileA': '/dir/fileB', 'fileB': '/dir/fileC', 'fileC': '/dir/fileE'}}),
+    ]
+)
+def test_copy_decouple(monkeypatch, temp_directory_layout, initial_structure, expected_structure):
+    monkeypatch.setattr(userspacegen, 'run', subprocess.run)
+    userspacegen._copy_decouple(
+            str(temp_directory_layout / 'initial' / 'dir'),
+            str(temp_directory_layout / 'expected' / 'dir'),
+            )
+
+    assert_directory_structure_matches(temp_directory_layout, initial_structure, expected_structure)
 
 
 @pytest.mark.parametrize('result,dst_ver,arch,prod_type', [
